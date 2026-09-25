@@ -2,19 +2,27 @@ import requests
 
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
+OVERPASS_URL = "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
 
 HEADERS = {
     "User-Agent": "RestaurantAIAgent/1.0"
 }
 
 
+city_cache = {}
+
+
 def get_city_coordinates(city: str):
+
+    if city in city_cache:
+        return city_cache[city]
 
     params = {
         "q": city,
         "format": "jsonv2",
-        "limit": 1
+        "limit": 1,
+        "countrycodes":"eg"  # Limit search to Egypt
     }
 
     response = requests.get(
@@ -36,10 +44,14 @@ def get_city_coordinates(city: str):
     latitude = float(locations[0]["lat"])
     longitude = float(locations[0]["lon"])
 
-    return {
+    coordinates = {
         "latitude": latitude,
         "longitude": longitude
     }
+
+    city_cache[city] = coordinates
+
+    return coordinates
 
 
 def search_restaurants(city: str):
@@ -53,7 +65,7 @@ def search_restaurants(city: str):
     longitude = coordinates["longitude"]
 
     query = f"""
-    [out:json][timeout:25];
+    [out:json][timeout:50];
 
     (
         node["amenity"="restaurant"](around:10000,{latitude},{longitude});
@@ -68,7 +80,7 @@ def search_restaurants(city: str):
         OVERPASS_URL,
         data=query,
         headers=HEADERS,
-        timeout=30
+        timeout=60
     )
 
     response.raise_for_status()
@@ -107,7 +119,7 @@ def search_restaurants_by_cuisine(city: str, cuisine: str):
     longitude = coordinates["longitude"]
 
     query = f"""
-    [out:json][timeout:25];
+    [out:json][timeout:50];
 
     (
         node["amenity"="restaurant"]["cuisine"~"{cuisine}", i]
@@ -127,7 +139,7 @@ def search_restaurants_by_cuisine(city: str, cuisine: str):
         OVERPASS_URL,
         data=query,
         headers=HEADERS,
-        timeout=30
+        timeout=60
     )
 
     response.raise_for_status()
@@ -155,7 +167,8 @@ def search_restaurants_by_cuisine(city: str, cuisine: str):
     return restaurants[:20]
 
 
-def get_restaurant_details( restaurant_name: str, city: str):
+def get_restaurant_details(restaurant_name: str, city: str):
+
     coordinates = get_city_coordinates(city)
 
     if "error" in coordinates:
@@ -165,12 +178,17 @@ def get_restaurant_details( restaurant_name: str, city: str):
     longitude = coordinates["longitude"]
 
     query = f"""
-    [out:json][timeout:25];
+    [out:json][timeout:50];
 
     (
-        node["amenity"="restaurant"]["name"="{restaurant_name}"](around:10000,{latitude},{longitude});
-        way["amenity"="restaurant"]["name"="{restaurant_name}"](around:10000,{latitude},{longitude});
-        relation["amenity"="restaurant"]["name"="{restaurant_name}"](around:10000,{latitude},{longitude});
+        node["amenity"="restaurant"]["name"="{restaurant_name}"]
+            (around:10000,{latitude},{longitude});
+
+        way["amenity"="restaurant"]["name"="{restaurant_name}"]
+            (around:10000,{latitude},{longitude});
+
+        relation["amenity"="restaurant"]["name"="{restaurant_name}"]
+            (around:10000,{latitude},{longitude});
     );
 
     out center tags;
@@ -180,7 +198,7 @@ def get_restaurant_details( restaurant_name: str, city: str):
         OVERPASS_URL,
         data=query,
         headers=HEADERS,
-        timeout=30
+        timeout=60
     )
 
     response.raise_for_status()
@@ -191,10 +209,14 @@ def get_restaurant_details( restaurant_name: str, city: str):
 
     if not elements:
         return {
-            "error": f"No details found for restaurant '{restaurant_name}' in city '{city}'."
+            "error": (
+                f"No details found for restaurant "
+                f"'{restaurant_name}' in city '{city}'."
+            )
         }
 
     element = elements[0]
+
     tags = element.get("tags", {})
 
     return {
@@ -209,4 +231,3 @@ def get_restaurant_details( restaurant_name: str, city: str):
             "city": tags.get("addr:city")
         }
     }
-        

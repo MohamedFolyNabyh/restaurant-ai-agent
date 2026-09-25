@@ -56,10 +56,18 @@ tool_registry = {
 # OpenRouter Client
 # =====================================
 
+# client = OpenAI(
+#     base_url="https://openrouter.ai/api/v1",
+#     api_key=os.getenv("OPENAI_API_KEY")
+# )
+
+
 client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENAI_API_KEY")
+    api_key=os.getenv("GEMINI_API_KEY"),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
 )
+
+model = "gemini-3.5-flash-lite"
 
 
 # =====================================
@@ -68,7 +76,7 @@ client = OpenAI(
 
 agent = Agent(
     client=client,
-    model="openrouter/free",
+    model=model,
     tool_registry=tool_registry
 )
 

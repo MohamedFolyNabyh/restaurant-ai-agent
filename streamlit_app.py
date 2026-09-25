@@ -76,8 +76,8 @@ tool_registry = {
 # =====================================
 
 client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENAI_API_KEY")
+    api_key=os.getenv("GEMINI_API_KEY"),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
 )
 
 
@@ -89,7 +89,7 @@ if "agent" not in st.session_state:
 
     st.session_state.agent = Agent(
         client=client,
-        model="openrouter/free",
+        model="gemini-3.5-flash-lite",
         tool_registry=tool_registry
     )
 

@@ -2,7 +2,9 @@
 
 A practical AI agent built to understand **LLM Function Calling / Tool Calling** by implementing the agent loop manually.
 
-The agent can search for real restaurant information using **OpenStreetMap Nominatim** and **Overpass API**, validate tool arguments with **Pydantic**, execute the selected Python function, return the tool result to the LLM, and continue the conversation until a final answer is produced.
+The agent can search for real restaurant information using **OpenStreetMap Nominatim** and a public **Overpass API** instance, validate tool arguments with **Pydantic**, execute the selected Python function, return the tool result to the LLM, and continue the conversation until a final answer is produced.
+
+The project uses **Gemini through its OpenAI-compatible API** while keeping the Agent loop implemented manually in Python.
 
 ---
 
@@ -10,7 +12,7 @@ The agent can search for real restaurant information using **OpenStreetMap Nomin
 
 The main goal of this project was to understand what happens **under the hood when an LLM uses tools**.
 
-Instead of using a complete agent framework to hide the process, the project manually implements:
+Instead of relying on a complete agent framework to hide the process, the project manually implements:
 
 * Tool registry
 * Tool schemas
@@ -23,6 +25,8 @@ Instead of using a complete agent framework to hide the process, the project man
 * Agent loop
 * Duplicate tool-call prevention
 * Maximum iteration control
+* Gemini `thought_signature` preservation
+* City coordinate caching
 
 The core flow is:
 
@@ -69,9 +73,10 @@ search_restaurants
 The tool:
 
 1. Converts the city name into coordinates using Nominatim.
-2. Uses the coordinates in an Overpass query.
-3. Searches for restaurants within a defined radius.
-4. Returns restaurant information.
+2. Restricts geocoding results to Egypt.
+3. Uses the coordinates in an Overpass query.
+4. Searches for restaurants within a 10 km radius.
+5. Returns available restaurant information.
 
 Returned information can include:
 
@@ -102,6 +107,17 @@ search_restaurants_by_cuisine
 
 The tool filters restaurants using the OpenStreetMap `cuisine` tag.
 
+For example, Gemini can generate:
+
+```json
+{
+  "city": "Cairo",
+  "cuisine": "italian"
+}
+```
+
+The external OpenStreetMap data is then queried using that value.
+
 ---
 
 ## 🏠 Restaurant Details
@@ -111,7 +127,7 @@ The agent can retrieve details about a specific restaurant.
 Example:
 
 ```text
-Tell me more about Pizza House in Cairo.
+Tell me more about Maison Thomas in Cairo.
 ```
 
 The agent can call:
@@ -128,6 +144,15 @@ cuisine
 phone
 website
 address
+```
+
+The address can include:
+
+```text
+street
+housenumber
+postcode
+city
 ```
 
 ---
@@ -170,7 +195,7 @@ For example:
 }
 ```
 
-The Agent then handles the execution.
+The Agent receives this information and executes the corresponding Python function.
 
 ---
 
@@ -184,7 +209,7 @@ Conceptually:
 tool_registry = {
     "search_restaurants": {
         "function": search_restaurants,
-        "description": "Search restaurants",
+        "description": "Search for restaurants in a specific city.",
         "schema": SearchRestaurantsInput
     }
 }
@@ -198,19 +223,17 @@ Description
 Pydantic Schema
 ```
 
-This registry is then converted into the format expected by the LLM.
+The registry is then converted into the format expected by the LLM.
 
 ---
 
 # 🧱 Building Tools for the LLM
 
-The Agent uses:
+The Agent builds the tool definitions during initialization:
 
 ```python
 self.tools = self._build_tools()
 ```
-
-during initialization.
 
 The `_build_tools()` method converts the internal tool registry into LLM-compatible tool definitions.
 
@@ -228,15 +251,13 @@ The schema is generated using:
 tool["schema"].model_json_schema()
 ```
 
-This allows the LLM to understand which parameters each tool expects.
+This allows the LLM to understand what each tool does and which parameters it expects.
 
 ---
 
 # ✅ Pydantic Validation
 
-When the LLM returns tool arguments, they are first parsed from JSON.
-
-Example:
+Tool arguments returned by the LLM are first parsed from JSON:
 
 ```python
 arguments = json.loads(
@@ -244,13 +265,23 @@ arguments = json.loads(
 )
 ```
 
-Then the arguments are validated using the corresponding Pydantic schema:
+Then they are validated using the corresponding Pydantic schema:
 
 ```python
 validated_arguments = schema(**arguments)
 ```
 
-This provides a validation layer between the LLM and the actual Python function.
+Only validated arguments are passed to the actual Python function.
+
+The function is executed using:
+
+```python
+result = function(
+    **validated_arguments.model_dump()
+)
+```
+
+This provides a validation layer between the LLM and the actual Python code.
 
 If validation fails, the tool is not executed and an error is returned.
 
@@ -258,41 +289,98 @@ If validation fails, the tool is not executed and an error is returned.
 
 # 🔄 Agent Loop
 
-The agent manually implements the LLM → Tool → LLM cycle.
+The Agent manually implements the LLM → Tool → LLM cycle.
 
 Simplified:
 
 ```text
-             ┌──────────────┐
-             │     User     │
-             └──────┬───────┘
-                    ↓
-             ┌──────────────┐
-             │     LLM      │
-             └──────┬───────┘
-                    │
-             Does it need a tool?
-                /          \
-              No            Yes
-              ↓              ↓
-       Final Answer      Tool Call
-                              ↓
-                       Execute Tool
-                              ↓
-                         Tool Result
-                              ↓
-                             LLM
-                              ↓
-                       Final Answer
+                 ┌──────────────┐
+                 │     User     │
+                 └──────┬───────┘
+                        ↓
+                 ┌──────────────┐
+                 │     LLM      │
+                 └──────┬───────┘
+                        │
+                 Does it need a tool?
+                    /          \
+                  No            Yes
+                  ↓              ↓
+           Final Answer      Tool Call
+                                  ↓
+                           Execute Tool
+                                  ↓
+                            Tool Result
+                                  ↓
+                                LLM
+                                  ↓
+                           Final Answer
 ```
 
-The project limits the number of cycles using:
+The current Agent uses:
 
 ```python
-max_iterations = 5
+max_iterations = 3
 ```
 
-This prevents an endless agent loop.
+This limits the number of LLM cycles and prevents an endless tool-calling loop.
+
+For example, a multi-step request can work like:
+
+```text
+User
+ ↓
+LLM
+ ↓
+search_restaurants_by_cuisine
+ ↓
+Restaurant Results
+ ↓
+LLM
+ ↓
+get_restaurant_details
+ ↓
+Restaurant Details
+ ↓
+LLM
+ ↓
+Final Answer
+```
+
+---
+
+# 🧠 Gemini Tool Calling and `thought_signature`
+
+The project uses Gemini through Google's OpenAI-compatible endpoint.
+
+Gemini can return an additional tool-call field containing a:
+
+```text
+thought_signature
+```
+
+When the Agent continues the conversation after a tool call, this information must be preserved.
+
+The Agent therefore keeps the returned `extra_content` when rebuilding the assistant tool-call message:
+
+```python
+if getattr(tool_call, "extra_content", None):
+    tool_call_data["extra_content"] = tool_call.extra_content
+```
+
+This allows the Agent to preserve information such as:
+
+```python
+{
+    "google": {
+        "thought_signature": "..."
+    }
+}
+```
+
+Without preserving this information, Gemini can reject the next tool-calling request.
+
+This was especially important when implementing the manual multi-step Agent loop with Gemini.
 
 ---
 
@@ -312,15 +400,24 @@ tool name
 tool arguments
 ```
 
-If the same call is requested again, it can be skipped.
+Example:
 
-This is a simple mechanism to prevent unnecessary repeated tool execution.
+```python
+call_key = (
+    tool_call.function.name,
+    tool_call.function.arguments,
+)
+```
+
+If the same tool call is requested again during the same `run()` execution, it can be skipped.
+
+This is a simple mechanism to reduce unnecessary repeated tool execution.
 
 ---
 
 # 🧠 Conversation History
 
-The Agent stores messages in:
+The Agent stores conversation messages in:
 
 ```python
 self.messages
@@ -335,7 +432,7 @@ assistant messages
 tool messages
 ```
 
-For example:
+A typical tool interaction looks like:
 
 ```text
 System
@@ -349,20 +446,65 @@ Tool → Result
 Assistant → Final Answer
 ```
 
-This allows the LLM to use information from previous turns when generating the next response.
+The history allows the LLM to use the previous tool result when generating the next step.
+
+This is especially important for multi-step requests.
+
+---
+
+# ⚡ City Coordinate Caching
+
+The project uses a simple in-memory cache:
+
+```python
+city_cache = {}
+```
+
+When a city is requested for the first time, Nominatim is called and the coordinates are stored.
+
+For later requests for the same city, the cached coordinates are returned.
+
+Conceptually:
+
+```text
+First request
+
+Cairo
+ ↓
+Nominatim
+ ↓
+Latitude + Longitude
+ ↓
+Cache
+
+
+Next request
+
+Cairo
+ ↓
+Cache
+ ↓
+Latitude + Longitude
+```
+
+This avoids repeatedly geocoding the same city.
+
+The cache is stored in memory, so it is cleared whenever the application restarts.
 
 ---
 
 # 🌍 Real-World Data Sources
 
-The project uses OpenStreetMap services for restaurant data.
+The project does not use a private restaurant database.
+
+Restaurant information is retrieved from **OpenStreetMap services**.
 
 ## Nominatim
 
 Nominatim is used for geocoding:
 
 ```text
-City name
+City Name
    ↓
 Latitude + Longitude
 ```
@@ -373,15 +515,21 @@ Endpoint:
 https://nominatim.openstreetmap.org/search
 ```
 
-## Overpass API
+The project restricts geocoding to Egypt using:
 
-Overpass is used to query OpenStreetMap data for restaurants.
-
-Endpoint:
-
-```text
-https://overpass-api.de/api/interpreter
+```python
+"countrycodes": "eg"
 ```
+
+This helps prevent ambiguous city names such as `Alexandria` from resolving to an unintended location outside Egypt.
+
+The request also uses:
+
+```python
+"addressdetails": 1
+```
+
+so the application can verify the returned country.
 
 The project sends an application-specific User-Agent:
 
@@ -391,55 +539,89 @@ HEADERS = {
 }
 ```
 
-This identifies the application when making requests to the public service.
+---
 
-Before deploying beyond a small demo, review the current usage policies and rate limits for the public OpenStreetMap services.
+## Overpass API
+
+Overpass is used to query OpenStreetMap data for restaurants.
+
+Current public endpoint:
+
+```text
+https://overpass.private.coffee/api/interpreter
+```
+
+The project uses Overpass queries such as:
+
+```text
+[out:json][timeout:50];
+```
+
+The HTTP request uses:
+
+```python
+timeout=60
+```
+
+This gives the external query up to 50 seconds while allowing a small additional window for the HTTP request.
+
+The current configuration is:
+
+```text
+Nominatim HTTP timeout: 10 seconds
+
+Overpass query timeout: 50 seconds
+
+Overpass HTTP timeout: 60 seconds
+```
+
+The project uses a public Overpass service for learning and demonstration purposes. Before using public OpenStreetMap services at larger scale, review the current usage policies, service limits, and availability.
 
 ---
 
 # 🏗️ Architecture
 
 ```text
-                    User
-                      │
-                      ▼
-                Restaurant Agent
-                      │
-                      ▼
-                     LLM
-                      │
-              ┌───────┴────────┐
-              │                │
-              ▼                ▼
-        Tool Call         Final Answer
-              │
-              ▼
-       Tool Registry
-              │
-      ┌───────┼──────────────┐
-      │       │              │
-      ▼       ▼              ▼
- search    search by      restaurant
-restaurants cuisine         details
-      │       │              │
-      └───────┼──────────────┘
-              │
-              ▼
-       External APIs
-              │
-       ┌──────┴──────┐
-       ▼             ▼
-   Nominatim      Overpass
-       │             │
-       └──────┬──────┘
-              ▼
-        Real Restaurant Data
-              │
-              ▼
-             LLM
-              │
-              ▼
-         Final Answer
+                         User
+                           │
+                           ▼
+                  Restaurant AI Agent
+                           │
+                           ▼
+                          LLM
+                           │
+                ┌──────────┴──────────┐
+                │                     │
+                ▼                     ▼
+           Tool Call             Final Answer
+                │
+                ▼
+          Tool Registry
+                │
+       ┌────────┼───────────────┐
+       │        │               │
+       ▼        ▼               ▼
+    search   search by      restaurant
+ restaurants  cuisine          details
+       │        │               │
+       └────────┼───────────────┘
+                │
+                ▼
+         External Services
+                │
+         ┌──────┴──────┐
+         ▼             ▼
+     Nominatim       Overpass
+         │             │
+         └──────┬──────┘
+                ▼
+       Real OpenStreetMap Data
+                │
+                ▼
+               LLM
+                │
+                ▼
+          Final Answer
 ```
 
 ---
@@ -453,9 +635,11 @@ restaurant-ai-agent/
 │   ├── agent.py
 │   ├── tools.py
 │   ├── schemas.py
+│   ├── prompt.py
 │   └── ...
 │
-├── .env
+├── streamlit_app.py
+├── .env.example
 ├── .gitignore
 ├── requirements.txt
 └── README.md
@@ -465,10 +649,10 @@ restaurant-ai-agent/
 
 # ⚙️ Installation
 
-## 1. Clone the repository
+## 1. Clone the Repository
 
 ```bash
-git clone <YOUR_GITHUB_REPOSITORY>
+git clone https://github.com/MohamedFolyNabyh/restaurant-ai-agent.git
 ```
 
 Move into the project directory:
@@ -508,6 +692,7 @@ openai
 pydantic
 requests
 python-dotenv
+streamlit
 ```
 
 The exact versions are defined in:
@@ -520,16 +705,32 @@ requirements.txt
 
 # 🔑 Environment Variables
 
-Create a `.env` file for the LLM provider configuration.
+The project uses Gemini through the OpenAI-compatible API.
 
-Example:
+Create a `.env` file:
 
 ```env
-OPENAI_API_KEY=your-api-key
-OPENAI_BASE_URL=your-compatible-base-url
+GEMINI_API_KEY=your-gemini-api-key
 ```
 
-Do not commit secrets to GitHub.
+The application creates the client using:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.getenv("GEMINI_API_KEY"),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+)
+```
+
+The current model is configured as:
+
+```python
+model = "gemini-3.5-flash-lite"
+```
+
+Do not commit your `.env` file or API keys to GitHub.
 
 Add:
 
@@ -541,35 +742,23 @@ to `.gitignore`.
 
 ---
 
-# ▶️ Running the Agent
+# ▶️ Running the Application
 
-Run the main application file used by the repository.
+The current project includes a Streamlit interface.
 
-For example:
+Run:
 
 ```bash
-python main.py
+streamlit run streamlit_app.py
 ```
 
-Then interact with the agent from the terminal.
-
-Example:
+Then open:
 
 ```text
-User: Find restaurants in Cairo
+http://localhost:8501
 ```
 
-The Agent may:
-
-```text
-1. Ask the LLM what to do
-2. Receive a tool call
-3. Parse the tool arguments
-4. Validate the arguments
-5. Execute the tool
-6. Send the tool result back to the LLM
-7. Generate the final answer
-```
+The interface allows you to interact with the Restaurant AI Agent directly.
 
 ---
 
@@ -579,22 +768,8 @@ The Agent may:
 
 ```text
 User:
-Find restaurants in Cairo.
-```
 
-Possible tool:
-
-```text
-search_restaurants
-```
-
----
-
-## Cuisine Search
-
-```text
-User:
-Find Italian restaurants in Cairo.
+عايز مطاعم ايطالية في القاهرة
 ```
 
 Possible tool:
@@ -603,13 +778,32 @@ Possible tool:
 search_restaurants_by_cuisine
 ```
 
+Expected flow:
+
+```text
+User
+ ↓
+Gemini
+ ↓
+search_restaurants_by_cuisine
+ ↓
+Overpass
+ ↓
+Restaurant Results
+ ↓
+Gemini
+ ↓
+Final Answer
+```
+
 ---
 
 ## Restaurant Details
 
 ```text
 User:
-Tell me more about Pizza House in Cairo.
+
+Maison Thomas عنوان ده فين
 ```
 
 Possible tool:
@@ -618,17 +812,67 @@ Possible tool:
 get_restaurant_details
 ```
 
+Expected flow:
+
+```text
+User
+ ↓
+Gemini
+ ↓
+get_restaurant_details
+ ↓
+Overpass
+ ↓
+Restaurant Details
+ ↓
+Gemini
+ ↓
+Final Answer
+```
+
+---
+
+## Multi-Step Example
+
+```text
+User:
+
+دورلي على مطاعم ايطالي في القاهرة وبعدها هات تفاصيل أول مطعم
+```
+
+The Agent can perform:
+
+```text
+Iteration 1
+    ↓
+search_restaurants_by_cuisine
+    ↓
+Restaurant Results
+    ↓
+Iteration 2
+    ↓
+get_restaurant_details
+    ↓
+Restaurant Details
+    ↓
+Iteration 3
+    ↓
+Final Answer
+```
+
+This demonstrates that the LLM can use the result of one tool call to decide the next action.
+
 ---
 
 # 🧩 Important Concepts Learned
 
 This project was mainly built to understand these concepts practically.
 
-### Tool Calling
+## Tool Calling
 
 The LLM decides whether a tool should be used and generates the required arguments.
 
-### Tool Schema
+## Tool Schema
 
 The schema tells the LLM:
 
@@ -638,23 +882,65 @@ What the tool does
 What parameters it expects
 ```
 
-### Pydantic Validation
+## Tool Registry
 
-The LLM output is treated as untrusted input and validated before the Python function runs.
-
-### Agent Loop
-
-The Agent can repeatedly move through:
+The registry keeps:
 
 ```text
-LLM → Tool → Result → LLM
+Function
+Description
+Schema
 ```
 
-until it reaches a final response.
+together in one place.
 
-### Conversation State
+## Pydantic Validation
 
-The Agent keeps previous messages so the LLM can use earlier context.
+The LLM output is treated as untrusted input and validated before the actual Python function runs.
+
+## Agent Loop
+
+The Agent manually manages:
+
+```text
+LLM
+ ↓
+Tool
+ ↓
+Tool Result
+ ↓
+LLM
+```
+
+until a final answer is produced or the maximum iteration count is reached.
+
+## Conversation State
+
+The Agent stores all relevant messages in:
+
+```python
+self.messages
+```
+
+so the LLM can use previous results.
+
+## External API Integration
+
+The tools connect the LLM to real-world data through:
+
+```text
+Nominatim
+OpenStreetMap
+Overpass API
+```
+
+## Caching
+
+City coordinates are cached in memory to avoid repeated geocoding requests.
+
+## Error Handling
+
+Tool execution errors are caught and returned to the LLM rather than crashing the entire Agent loop.
 
 ---
 
@@ -664,7 +950,9 @@ Frameworks such as LangGraph can manage agent state, routing, tool execution, an
 
 This project intentionally implements the basic mechanism manually to make the underlying process easier to understand.
 
-The goal was not to replace frameworks, but to understand what happens underneath them.
+The goal is not to replace frameworks.
+
+The goal is to understand what happens underneath them.
 
 In this project, the Agent itself manages:
 
@@ -677,7 +965,11 @@ Function execution
 Tool results
 Conversation history
 Iteration limits
+Duplicate call prevention
+Gemini thought signatures
 ```
+
+Once this mechanism is understood, frameworks such as LangGraph become easier to understand because the developer can see what abstraction they are providing.
 
 ---
 
@@ -691,11 +983,11 @@ Possible improvements include:
 * Distance-based search
 * Opening-hours support
 * Additional restaurant data sources
-* Caching geocoding results
-* More robust error handling
-* LangGraph version of the same agent
+* More advanced caching
+* More robust external API fallback handling
+* LangGraph version of the same Agent
 * FastAPI API layer
-* Streamlit interface
+* Additional Streamlit features
 
 ---
 
@@ -704,7 +996,8 @@ Possible improvements include:
 Current implementation includes:
 
 * ✅ Manual Agent Loop
-* ✅ OpenAI-compatible LLM client
+* ✅ Gemini LLM
+* ✅ OpenAI-compatible Gemini client
 * ✅ Function Calling
 * ✅ Tool Registry
 * ✅ Dynamic Tool Schemas
@@ -714,10 +1007,57 @@ Current implementation includes:
 * ✅ Cuisine-based Search
 * ✅ Restaurant Details
 * ✅ Nominatim Geocoding
+* ✅ Egypt Country Restriction
 * ✅ Overpass Queries
+* ✅ City Coordinate Caching
 * ✅ Conversation History
 * ✅ Duplicate Tool-Call Prevention
 * ✅ Maximum Iteration Control
+* ✅ Gemini `thought_signature` Preservation
+* ✅ Error Handling
+* ✅ Streamlit Interface
+
+---
+
+# 🎥 Demo
+
+The current Streamlit demo can be tested with examples such as:
+
+```text
+عايز مطاعم ايطالية في القاهرة
+```
+
+and:
+
+```text
+Maison Thomas عنوان ده فين
+```
+
+These demonstrate:
+
+```text
+LLM
+ ↓
+Tool Selection
+ ↓
+Function Calling
+ ↓
+Pydantic Validation
+ ↓
+External API
+ ↓
+Tool Result
+ ↓
+Final Answer
+```
+
+A multi-step query can also demonstrate:
+
+```text
+دورلي على مطاعم ايطالي في القاهرة وبعدها هات تفاصيل أول مطعم
+```
+
+which shows the Agent moving through multiple tool calls before producing the final answer.
 
 ---
 
@@ -739,24 +1079,30 @@ The main objective of this project was to understand the complete lifecycle of a
 
 ```text
 User Request
-    ↓
+      ↓
 LLM Decision
-    ↓
+      ↓
 Tool Call
-    ↓
+      ↓
 JSON Parsing
-    ↓
+      ↓
 Pydantic Validation
-    ↓
+      ↓
 Python Function
-    ↓
+      ↓
 External API
-    ↓
+      ↓
 Tool Result
-    ↓
+      ↓
+Conversation History
+      ↓
 LLM
-    ↓
+      ↓
 Final Answer
 ```
 
-The project demonstrates that an AI Agent is not just an LLM generating text. The LLM can act as the decision-maker while external tools perform the actual operations and provide real-world information.
+The project demonstrates that an AI Agent is not just an LLM generating text.
+
+The LLM can act as the **decision-maker**, while external Python tools perform the actual operations and provide real-world information.
+
+The main purpose of building this project manually was to understand the mechanism behind **Function Calling and Tool-Using Agents** before relying on higher-level frameworks.
